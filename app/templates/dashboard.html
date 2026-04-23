@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LogIQ - Real-Time Log Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .dashboard-container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        .header {
+            background: white;
+            border-radius: 15px;
+            padding: 20px 30px;
+            margin-bottom: 25px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .stat-icon {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        .stat-value {
+            font-size: 36px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .stat-change {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #10b981;
+        }
+
+        /* Charts Row */
+        .charts-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .chart-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+
+        .chart-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        canvas {
+            max-height: 300px;
+        }
+
+        /* Logs Table */
+        .logs-section {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .filter-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .filter-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .filter-btn.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .filter-btn:not(.active) {
+            background: #e5e7eb;
+            color: #666;
+        }
+
+        .logs-table {
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            text-align: left;
+            padding: 12px;
+            background: #f9fafb;
+            font-weight: 600;
+            color: #333;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 13px;
+        }
+
+        .severity-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .severity-ERROR { background: #fee2e2; color: #dc2626; }
+        .severity-CRITICAL { background: #fecaca; color: #991b1b; }
+        .severity-WARNING { background: #fed7aa; color: #ea580c; }
+        .severity-INFO { background: #d1fae5; color: #059669; }
+        .severity-DEBUG { background: #e0e7ff; color: #4f46e5; }
+
+        .log-message {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <div class="header">
+            <h1>📊 LogIQ Real-Time Dashboard</h1>
+            <div class="status-badge">
+                <div class="status-dot"></div>
+                <span>Live Streaming</span>
+            </div>
+        </div>
+
+        <!-- Stats Grid -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon">📝</div>
+                <div class="stat-value" id="totalLogs">0</div>
+                <div class="stat-label">Total Logs Processed</div>
+                <div class="stat-change" id="logsRate">0 logs/min</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">❌</div>
+                <div class="stat-value" id="errorCount">0</div>
+                <div class="stat-label">Errors</div>
+                <div class="stat-change" id="errorRate">0% of total</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">⚠️</div>
+                <div class="stat-value" id="warnCount">0</div>
+                <div class="stat-label">Warnings</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">ℹ️</div>
+                <div class="stat-value" id="infoCount">0</div>
+                <div class="stat-label">Info</div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-row">
+            <div class="chart-card">
+                <div class="chart-title">Logs per Minute (Last 10 minutes)</div>
+                <canvas id="logsChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <div class="chart-title">Severity Distribution</div>
+                <canvas id="severityChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Logs Table -->
+        <div class="logs-section">
+            <div class="section-header">
+                <h3>Recent Logs</h3>
+                <div class="filter-buttons">
+                    <button class="filter-btn active" onclick="setFilter('ALL')">All</button>
+                    <button class="filter-btn" onclick="setFilter('ERROR')">🔴 Errors</button>
+                    <button class="filter-btn" onclick="setFilter('WARNING')">🟡 Warnings</button>
+                    <button class="filter-btn" onclick="setFilter('INFO')">🔵 Info</button>
+                    <button class="filter-btn" onclick="setFilter('DEBUG')">🟣 Debug</button>
+                </div>
+            </div>
+            <div class="logs-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Severity</th>
+                            <th>Source</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logsTableBody">
+                        <tr>
+                            <td colspan="4" style="text-align: center;">Connecting to log stream...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="controls">
+                <button class="btn btn-primary" onclick="clearLogs()">🗑 Clear Logs</button>
+                <button class="btn btn-danger" onclick="stopSimulation()">⏹ Stop Streaming</button>
+                <button class="btn btn-primary" onclick="startSimulation()">▶ Start Streaming</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let currentFilter = 'ALL';
+        let logs = [];
+        let logsPerMinute = [];
+        let severityData = {ERROR: 0, WARNING: 0, INFO: 0, DEBUG: 0, CRITICAL: 0};
+        
+        // Initialize charts
+        const ctx = document.getElementById('logsChart').getContext('2d');
+        const logsChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: Array(10).fill(''),
+                datasets: [{
+                    label: 'Logs per Minute',
+                    data: Array(10).fill(0),
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true
+            }
+        });
+        
+        const severityCtx = document.getElementById('severityChart').getContext('2d');
+        const severityChart = new Chart(severityCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['ERROR', 'WARNING', 'INFO', 'DEBUG', 'CRITICAL'],
+                datasets: [{
+                    data: [0, 0, 0, 0, 0],
+                    backgroundColor: ['#dc2626', '#ea580c', '#059669', '#4f46e5', '#991b1b']
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true
+            }
+        });
+        
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:8000/ws/logs');
+            
+            ws.onopen = function() {
+                console.log('WebSocket connected');
+                updateStatus('Connected');
+            };
+            
+            ws.onmessage = function(event) {
+                const log = JSON.parse(event.data);
+                addLog(log);
+                updateStats(log);
+            };
+            
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                updateStatus('Error');
+            };
+            
+            ws.onclose = function() {
+                console.log('WebSocket disconnected');
+                updateStatus('Disconnected');
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+        
+        function addLog(log) {
+            logs.unshift(log);
+            if (logs.length > 100) logs.pop();
+            
+            if (currentFilter === 'ALL' || log.level === currentFilter) {
+                updateLogsTable();
+            }
+        }
+        
+        function updateLogsTable() {
+            const tbody = document.getElementById('logsTableBody');
+            const filteredLogs = currentFilter === 'ALL' ? logs : logs.filter(l => l.level === currentFilter);
+            
+            if (filteredLogs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align: center;">No logs to display</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = filteredLogs.slice(0, 50).map(log => `
+                <tr>
+                    <td style="white-space: nowrap;">${new Date(log.timestamp).toLocaleTimeString()}</td>
+                    <td><span class="severity-badge severity-${log.level}">${log.level}</span></td>
+                    <td>${log.source}</td>
+                    <td class="log-message" title="${log.message}">${log.message.substring(0, 80)}${log.message.length > 80 ? '...' : ''}</td>
+                </tr>
+            `).join('');
+        }
+        
+        function updateStats(log) {
+            // Update counts
+            document.getElementById('totalLogs').innerText = logs.length;
+            
+            const errorCount = logs.filter(l => l.level === 'ERROR' || l.level === 'CRITICAL').length;
+            const warnCount = logs.filter(l => l.level === 'WARNING').length;
+            const infoCount = logs.filter(l => l.level === 'INFO').length;
+            
+            document.getElementById('errorCount').innerText = errorCount;
+            document.getElementById('warnCount').innerText = warnCount;
+            document.getElementById('infoCount').innerText = infoCount;
+            
+            const errorRate = logs.length > 0 ? ((errorCount / logs.length) * 100).toFixed(1) : 0;
+            document.getElementById('errorRate').innerHTML = `${errorRate}% of total`;
+            
+            // Update severity chart
+            severityData = {ERROR: 0, WARNING: 0, INFO: 0, DEBUG: 0, CRITICAL: 0};
+            logs.forEach(l => {
+                if (severityData[l.level]) severityData[l.level]++;
+                else severityData[l.level] = 1;
+            });
+            
+            severityChart.data.datasets[0].data = [
+                severityData.ERROR || 0,
+                severityData.WARNING || 0,
+                severityData.INFO || 0,
+                severityData.DEBUG || 0,
+                severityData.CRITICAL || 0
+            ];
+            severityChart.update();
+            
+            // Calculate logs per minute
+            const now = Date.now();
+            const lastMinuteLogs = logs.filter(l => (now - new Date(l.timestamp).getTime()) < 60000);
+            const rate = lastMinuteLogs.length;
+            document.getElementById('logsRate').innerHTML = `${rate} logs/min`;
+            
+            // Update trend chart
+            logsPerMinute.push(rate);
+            if (logsPerMinute.length > 10) logsPerMinute.shift();
+            logsChart.data.datasets[0].data = logsPerMinute;
+            logsChart.update();
+        }
+        
+        function setFilter(level) {
+            currentFilter = level;
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.innerText.includes(level) || (level === 'ALL' && btn.innerText === 'All')) {
+                    btn.classList.add('active');
+                }
+            });
+            updateLogsTable();
+        }
+        
+        function clearLogs() {
+            logs = [];
+            logsPerMinute = [];
+            severityData = {ERROR: 0, WARNING: 0, INFO: 0, DEBUG: 0, CRITICAL: 0};
+            updateLogsTable();
+            updateStats({level: 'INFO'});
+        }
+        
+        function startSimulation() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({action: 'start'}));
+            }
+        }
+        
+        function stopSimulation() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({action: 'stop'}));
+            }
+        }
+        
+        function updateStatus(status) {
+            // Update status indicator
+        }
+        
+        // Connect on load
+        connectWebSocket();
+    </script>
+</body>
+</html>

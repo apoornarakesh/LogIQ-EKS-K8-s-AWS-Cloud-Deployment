@@ -1,0 +1,720 @@
+"""
+Production LogIQ Dashboard with AWS Metrics & Container Tracking
+"""
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+import json
+import asyncio
+import random
+import psutil
+import subprocess
+from datetime import datetime
+from typing import Dict, Any
+import os
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Store data
+logs = []
+connected_clients = []
+streaming_active = True
+aws_metrics_history = []
+
+def get_docker_containers():
+    """Get all running Docker containers with their details"""
+    try:
+        result = subprocess.run(['docker', 'ps', '--format', '{{.Names}}|{{.Image}}|{{.Status}}'], 
+                              capture_output=True, text=True)
+        containers = []
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                parts = line.split('|')
+                containers.append({
+                    'name': parts[0],
+                    'image': parts[1] if len(parts) > 1 else 'unknown',
+                    'status': parts[2] if len(parts) > 2 else 'running',
+                    'type': 'docker'
+                })
+        return containers
+    except:
+        return []
+
+def get_aws_metrics():
+    """Get AWS/System metrics"""
+    try:
+        # CPU metrics
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_count = psutil.cpu_count()
+        
+        # Memory metrics
+        memory = psutil.virtual_memory()
+        
+        # Disk metrics
+        disk = psutil.disk_usage('/')
+        
+        # Network metrics
+        network = psutil.net_io_counters()
+        
+        metrics = {
+            'timestamp': datetime.now().isoformat(),
+            'cpu': {
+                'percent': cpu_percent,
+                'count': cpu_count,
+                'per_core': psutil.cpu_percent(interval=1, percpu=True)
+            },
+            'memory': {
+                'total': memory.total,
+                'available': memory.available,
+                'percent': memory.percent,
+                'used': memory.used,
+                'free': memory.free
+            },
+            'disk': {
+                'total': disk.total,
+                'used': disk.used,
+                'free': disk.free,
+                'percent': disk.percent
+            },
+            'network': {
+                'bytes_sent': network.bytes_sent,
+                'bytes_recv': network.bytes_recv,
+                'packets_sent': network.packets_sent,
+                'packets_recv': network.packets_recv
+            }
+        }
+        
+        aws_metrics_history.append(metrics)
+        if len(aws_metrics_history) > 60:  # Keep last 60 data points
+            aws_metrics_history.pop(0)
+        
+        return metrics
+    except Exception as e:
+        print(f"Error getting metrics: {e}")
+        return None
+
+def generate_log_with_context():
+    """Generate log with pod/container context"""
+    containers = get_docker_containers()
+    
+    # If no containers found, create mock data
+    if not containers:
+        containers = [
+            {'name': 'logiq-api-1', 'image': 'logiq/api:latest', 'status': 'Up 2 hours', 'type': 'docker'},
+            {'name': 'logiq-worker-1', 'image': 'logiq/worker:latest', 'status': 'Up 2 hours', 'type': 'docker'},
+            {'name': 'logiq-kafka-1', 'image': 'confluent/kafka:latest', 'status': 'Up 2 hours', 'type': 'docker'},
+            {'name': 'logiq-postgres-1', 'image': 'postgres:15', 'status': 'Up 2 hours', 'type': 'docker'},
+        ]
+    
+    container = random.choice(containers)
+    
+    log_levels = ['INFO', 'WARNING', 'ERROR', 'DEBUG', 'CRITICAL']
+    services = ['api', 'worker', 'kafka', 'postgres', 'redis', 'elasticsearch']
+    error_types = [
+        'Connection refused', 'Timeout', 'Authentication failed', 
+        'Resource exhausted', 'Rate limit exceeded', 'Database deadlock',
+        'Network partition', 'Disk full', 'Memory limit exceeded'
+    ]
+    
+    # Weighted severity
+    rand = random.random()
+    if rand < 0.6:
+        level = 'INFO'
+    elif rand < 0.8:
+        level = 'WARNING'
+    elif rand < 0.95:
+        level = 'ERROR'
+    else:
+        level = 'CRITICAL'
+    
+    messages = {
+        'INFO': [
+            f"Container {container['name']} started successfully",
+            f"Health check passed for {container['name']}",
+            f"Successfully connected to database",
+            f"Processed 1000 requests",
+            f"Cache warmed up for service"
+        ],
+        'WARNING': [
+            f"High latency detected in {container['name']}",
+            f"Memory usage above 80% in {container['name']}",
+            f"Slow query detected (2.5s)",
+            f"Retrying connection to database (attempt 3)",
+            f"Rate limit approaching threshold"
+        ],
+        'ERROR': [
+            f"Connection failed from {container['name']} to database",
+            f"Timeout processing request in {container['name']}",
+            f"{random.choice(error_types)} in {container['name']}",
+            f"Failed to write to log storage",
+            f"Unhandled exception in worker thread"
+        ],
+        'CRITICAL': [
+            f"CRITICAL: {container['name']} is unhealthy - restarting",
+            f"Data corruption detected in {container['name']}",
+            f"Complete service outage in {container['name']} zone",
+            f"Security breach detected from IP 192.168.1.{random.randint(1,255)}"
+        ],
+        'DEBUG': [
+            f"Debug: Processing request ID req_{random.randint(1000,9999)}",
+            f"Debug: Cache key miss for user_{random.randint(1,100)}",
+            f"Debug: Query plan generated in 5ms"
+        ]
+    }
+    
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "level": level,
+        "source": random.choice(services),
+        "container": container['name'],
+        "container_image": container['image'],
+        "container_status": container['status'],
+        "message": random.choice(messages.get(level, messages['INFO'])),
+        "trace_id": f"trace_{random.randint(10000, 99999)}",
+        "pod_id": f"pod-{random.randint(1,10)}",
+        "namespace": "production",
+        "region": "us-east-1"
+    }
+
+async def broadcast_to_clients(data):
+    """Broadcast data to all connected WebSocket clients"""
+    message = json.dumps(data)
+    for client in connected_clients[:]:
+        try:
+            await client.send_text(message)
+        except:
+            if client in connected_clients:
+                connected_clients.remove(client)
+
+async def metrics_generator():
+    """Generate and broadcast AWS metrics"""
+    while True:
+        if connected_clients:
+            metrics = get_aws_metrics()
+            if metrics:
+                await broadcast_to_clients({
+                    "type": "metrics",
+                    "data": metrics
+                })
+        await asyncio.sleep(5)  # Update every 5 seconds
+
+async def log_generator():
+    """Generate and broadcast logs"""
+    global streaming_active
+    while True:
+        if streaming_active and connected_clients:
+            log = generate_log_with_context()
+            logs.insert(0, log)
+            if len(logs) > 500:
+                logs.pop()
+            await broadcast_to_clients({
+                "type": "log",
+                "data": log
+            })
+        await asyncio.sleep(0.5)  # 2 logs per second
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks"""
+    print("\n" + "=" * 60)
+    print("🚀 Production LogIQ Dashboard Started")
+    print("=" * 60)
+    print("\n📊 Dashboard URL: http://localhost:8000")
+    print("📡 Features:")
+    print("   • Container/Pod tracking")
+    print("   • AWS/System metrics")
+    print("   • Real-time log streaming")
+    print("   • Stop/Start controls")
+    print("\n" + "=" * 60 + "\n")
+    
+    asyncio.create_task(log_generator())
+    asyncio.create_task(metrics_generator())
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.append(websocket)
+    
+    # Send recent logs
+    for log in logs[-100:]:
+        await websocket.send_text(json.dumps({"type": "log", "data": log}))
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            msg = json.loads(data)
+            if msg.get('action') == 'stop':
+                global streaming_active
+                streaming_active = False
+                await websocket.send_text(json.dumps({"type": "control", "status": "stopped"}))
+            elif msg.get('action') == 'start':
+                streaming_active = True
+                await websocket.send_text(json.dumps({"type": "control", "status": "started"}))
+            elif msg.get('action') == 'clear':
+                logs.clear()
+                await websocket.send_text(json.dumps({"type": "control", "status": "cleared"}))
+    except:
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
+
+# Production Dashboard HTML
+HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LogIQ Intelligent Log Analysis System EKS AWS Cloud Deployment</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        
+        .dashboard {
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        /* Main Content (Left) */
+        .main-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+        
+        /* Sidebar (Right) - Live Streaming */
+        .sidebar {
+            width: 400px;
+            background: #0f1433;
+            border-left: 1px solid #1a1f3e;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .sidebar-header {
+            padding: 20px;
+            background: #0a0e27;
+            border-bottom: 1px solid #1a1f3e;
+        }
+        
+        .live-stream {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+        }
+        
+        .stream-item {
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #1a1f3e;
+            border-radius: 8px;
+            border-left: 3px solid;
+            font-size: 12px;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .stat-card {
+            background: #1a1f3e;
+            border-radius: 15px;
+            padding: 20px;
+            transition: transform 0.2s;
+        }
+        
+        .stat-card:hover { transform: translateY(-5px); }
+        .stat-value { font-size: 32px; font-weight: bold; color: #667eea; }
+        .stat-label { color: #888; margin-top: 5px; font-size: 12px; }
+        
+        /* Metrics Section */
+        .metrics-section {
+            background: #1a1f3e;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .metric {
+            text-align: center;
+        }
+        
+        .metric-value { font-size: 24px; font-weight: bold; }
+        .metric-label { font-size: 11px; color: #888; margin-top: 5px; }
+        
+        /* Containers Section */
+        .containers-section {
+            background: #1a1f3e;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .container-list {
+            display: grid;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .container-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #0f1433;
+            border-radius: 8px;
+        }
+        
+        .container-name { font-family: monospace; font-size: 12px; }
+        .container-status {
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 10px;
+        }
+        .status-running { background: #10b981; color: white; }
+        .status-exited { background: #ef4444; color: white; }
+        
+        /* Logs Table */
+        .logs-section {
+            background: #1a1f3e;
+            border-radius: 15px;
+            padding: 20px;
+        }
+        
+        .logs-table {
+            max-height: 400px;
+            overflow-y: auto;
+            margin-top: 15px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        
+        th {
+            text-align: left;
+            padding: 10px;
+            background: #0f1433;
+            position: sticky;
+            top: 0;
+        }
+        
+        td {
+            padding: 8px 10px;
+            border-bottom: 1px solid #2a2f4e;
+        }
+        
+        .severity {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: bold;
+        }
+        .severity-ERROR { background: #dc2626; color: white; }
+        .severity-CRITICAL { background: #991b1b; color: white; }
+        .severity-WARNING { background: #f59e0b; color: white; }
+        .severity-INFO { background: #10b981; color: white; }
+        .severity-DEBUG { background: #8b5cf6; color: white; }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        .btn-stop { background: #dc2626; color: white; }
+        .btn-start { background: #10b981; color: white; }
+        .btn-clear { background: #6b7280; color: white; }
+        
+        button:hover { opacity: 0.8; transform: translateY(-2px); }
+        
+        .filter-btn {
+            padding: 5px 12px;
+            background: #0f1433;
+            color: #e0e0e0;
+            margin-right: 5px;
+        }
+        .filter-btn.active { background: #667eea; }
+        
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track { background: #0f1433; }
+        ::-webkit-scrollbar-thumb { background: #667eea; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Main Content -->
+        <div class="main-content">
+            <div class="header">
+                <h1>📊 LogIQ Production Dashboard</h1>
+                <p style="margin-top: 5px; opacity: 0.8;">Container Tracking | AWS Metrics | Real-time Logs</p>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="totalLogs">0</div>
+                    <div class="stat-label">Total Logs</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="errorCount">0</div>
+                    <div class="stat-label">Errors</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="logsPerMin">0</div>
+                    <div class="stat-label">Logs/Minute</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="activeContainers">0</div>
+                    <div class="stat-label">Active Containers</div>
+                </div>
+            </div>
+            
+            <div class="metrics-section">
+                <h3>📈 AWS/System Metrics</h3>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-value" id="cpuMetric">0%</div>
+                        <div class="metric-label">CPU Usage</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="memoryMetric">0%</div>
+                        <div class="metric-label">Memory Usage</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="diskMetric">0%</div>
+                        <div class="metric-label">Disk Usage</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="networkMetric">0 MB/s</div>
+                        <div class="metric-label">Network I/O</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="logs-section">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <h3>📋 Log History</h3>
+                    <div>
+                        <button class="filter-btn active" onclick="setFilter('ALL')">ALL</button>
+                        <button class="filter-btn" onclick="setFilter('ERROR')">ERROR</button>
+                        <button class="filter-btn" onclick="setFilter('WARNING')">WARNING</button>
+                        <button class="filter-btn" onclick="setFilter('INFO')">INFO</button>
+                    </div>
+                </div>
+                <div class="logs-table" id="logsTable">
+                    <div style="text-align: center; padding: 40px;">Loading logs...</div>
+                </div>
+                <div class="controls">
+                    <button class="btn-stop" onclick="stopStreaming()">⏹ Stop Streaming</button>
+                    <button class="btn-start" onclick="startStreaming()">▶ Start Streaming</button>
+                    <button class="btn-clear" onclick="clearLogs()">🗑 Clear All</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Sidebar - Live Streaming -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h3>🔴 LIVE STREAM</h3>
+                <p style="font-size: 11px; color: #888;">Real-time container logs</p>
+            </div>
+            <div class="live-stream" id="liveStream">
+                <div style="text-align: center; padding: 20px; color: #888;">Waiting for logs...</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let ws = null;
+        let currentFilter = 'ALL';
+        let logs = [];
+        let logTimes = [];
+        let streamingEnabled = true;
+        
+        function connect() {
+            ws = new WebSocket('ws://localhost:8000/ws');
+            ws.onopen = () => console.log('✅ Connected');
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                if (data.type === 'log') {
+                    if (streamingEnabled) addLog(data.data);
+                } else if (data.type === 'metrics') {
+                    updateMetrics(data.data);
+                } else if (data.type === 'control') {
+                    console.log('Control:', data.status);
+                }
+            };
+            ws.onclose = () => setTimeout(connect, 3000);
+        }
+        
+        function addLog(log) {
+            logs.unshift(log);
+            if (logs.length > 500) logs.pop();
+            
+            logTimes.push(Date.now());
+            logTimes = logTimes.filter(t => Date.now() - t < 60000);
+            
+            updateDisplay();
+            addToLiveStream(log);
+        }
+        
+        function addToLiveStream(log) {
+            const stream = document.getElementById('liveStream');
+            const streamItem = document.createElement('div');
+            streamItem.className = 'stream-item';
+            streamItem.style.borderLeftColor = getSeverityColor(log.level);
+            streamItem.innerHTML = `
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span style="font-size: 10px; color: #888;">${new Date(log.timestamp).toLocaleTimeString()}</span>
+                    <span class="severity severity-${log.level}" style="font-size: 8px;">${log.level}</span>
+                </div>
+                <div style="font-size: 11px;"><strong>${log.container}</strong> [${log.source}]</div>
+                <div style="font-size: 10px; margin-top: 5px;">${log.message}</div>
+            `;
+            stream.insertBefore(streamItem, stream.firstChild);
+            if (stream.children.length > 50) stream.removeChild(stream.lastChild);
+        }
+        
+        function updateDisplay() {
+            const filtered = currentFilter === 'ALL' ? logs : logs.filter(l => l.level === currentFilter);
+            const container = document.getElementById('logsTable');
+            
+            if (filtered.length === 0) {
+                container.innerHTML = '<div style="text-align:center;padding:40px;">No logs</div>';
+                return;
+            }
+            
+            let html = '<table><thead><tr><th>Time</th><th>Severity</th><th>Container</th><th>Source</th><th>Message</th></tr></thead><tbody>';
+            filtered.slice(0, 100).forEach(log => {
+                html += `<tr>
+                    <td style="white-space:nowrap;">${new Date(log.timestamp).toLocaleTimeString()}</td>
+                    <td><span class="severity severity-${log.level}">${log.level}</span></td>
+                    <td><code style="font-size: 10px;">${log.container}</code></td>
+                    <td>${log.source}</td>
+                    <td style="word-break:break-word;">${log.message}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+            
+            document.getElementById('totalLogs').innerText = logs.length;
+            document.getElementById('errorCount').innerText = logs.filter(l => l.level === 'ERROR' || l.level === 'CRITICAL').length;
+            document.getElementById('logsPerMin').innerText = logTimes.length;
+            
+            const containers = new Set(logs.map(l => l.container));
+            document.getElementById('activeContainers').innerText = containers.size;
+        }
+        
+        function updateMetrics(metrics) {
+            if (metrics.cpu) document.getElementById('cpuMetric').innerText = `${metrics.cpu.percent}%`;
+            if (metrics.memory) document.getElementById('memoryMetric').innerText = `${metrics.memory.percent}%`;
+            if (metrics.disk) document.getElementById('diskMetric').innerText = `${metrics.disk.percent}%`;
+            
+            const netMBps = ((metrics.network?.bytes_sent + metrics.network?.bytes_recv) / 1024 / 1024).toFixed(1);
+            document.getElementById('networkMetric').innerText = `${netMBps} MB/s`;
+        }
+        
+        function getSeverityColor(level) {
+            const colors = { ERROR: '#dc2626', CRITICAL: '#991b1b', WARNING: '#f59e0b', INFO: '#10b981', DEBUG: '#8b5cf6' };
+            return colors[level] || '#667eea';
+        }
+        
+        function setFilter(level) {
+            currentFilter = level;
+            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            updateDisplay();
+        }
+        
+        function stopStreaming() {
+            streamingEnabled = false;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({action: 'stop'}));
+            }
+        }
+        
+        function startStreaming() {
+            streamingEnabled = true;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({action: 'start'}));
+            }
+        }
+        
+        function clearLogs() {
+            logs = [];
+            logTimes = [];
+            updateDisplay();
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({action: 'clear'}));
+            }
+        }
+        
+        connect();
+    </script>
+</body>
+</html>
+"""
+
+@app.get("/")
+@app.get("/dashboard")
+async def root():
+    return HTMLResponse(HTML)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
