@@ -274,8 +274,6 @@ logiq/
 
 Name	Role
 Poornarakesh Anagani	Lead Developer - NLP Pipeline, AWS Deployment
-Charani Kavali	Backend Developer - API, Databases
-Pujitha Maddireddy	Frontend Developer - React UI, Visualizations
 Course: CS 6030-120: Natural Language Processing
 Instructor: Prof. Alvis Fong
 University: Western Michigan University
